@@ -1,0 +1,602 @@
+options
+{
+	STATIC = true;
+	FORCE_LA_CHECK = true;
+}
+
+PARSER_BEGIN(Assignment)
+
+import java.io.StringReader;
+import java.io.Reader;
+import java.util.Map;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.HashMap;
+import java.util.Queue;
+import java.util.ArrayDeque;
+import java.util.HashSet;
+import java.util.Set;
+
+public class Assignment
+{
+    public static final String ENTRY_POINT_FUNCTION = "MAIN";
+
+    public static void main(String args [])
+    {
+        try
+        {
+            Integer result = parse();
+            System.out.println("PASS");
+            System.out.println(result != null? result: "DIVERGENCE");
+        }
+        catch (SemanticError e)
+        {
+            System.out.println("FAIL");
+            System.err.println(e.getLineNumber());
+            System.err.println(e.getMessage());
+            System.exit(1);
+        }
+        catch (ParseException e)
+        {
+            System.out.println("FAIL");
+            System.err.println(e.currentToken.beginLine);
+            System.err.print("Expected " + e.tokenImage[e.expectedTokenSequences[0][0]]);
+            for (int[] x: e.expectedTokenSequences)
+            {
+                System.err.print(" or " + e.tokenImage[x[0]]);
+            }
+            System.err.println(" at column "
+                + (e.currentToken == null? 0: e.currentToken.beginColumn));
+            System.exit(1);
+        }
+    }
+
+	public static Integer parse() throws SemanticError, ParseException
+	{	
+		Assignment parser = new Assignment(System.in);
+		
+        functionDefinitions = parser.Start();
+
+		FunctionDefinition mainFunc = functionDefinitions.get(ENTRY_POINT_FUNCTION);
+
+		// Check missing MAIN function
+		if (mainFunc == null) 
+		{
+            throw new SemanticError("Missing " + ENTRY_POINT_FUNCTION + " function", 0);
+		}
+
+        // Check that MAIN has no params
+        if (mainFunc.paramCount() != 0)
+        {
+            throw new SemanticError(ENTRY_POINT_FUNCTION + " must have zero parameters.", mainFunc.lineNumber);
+        }
+
+        // Checkthat non-MAIN functions have exactly one param
+        for (FunctionDefinition fdef: functionDefinitions.values())
+        {
+            if (fdef != mainFunc && fdef.paramCount() != 1)
+            {
+                throw new SemanticError("Function " + fdef.funcName
+                    + " must have exactly one parameter", fdef.lineNumber);
+            }
+        }
+
+        // Check that all referenced functions exist.
+        Set<String> definedNames = functionDefinitions.keySet();
+        for (FunctionDefinition fdef: functionDefinitions.values())
+        {   
+            if (!definedNames.containsAll(fdef.functionsCalled()))
+            {
+                for (String fname: fdef.functionsCalled())
+                {
+                    if (!definedNames.contains(fname))
+                    {
+                        throw new SemanticError("Function " + fdef.funcName
+                            + " references undefined function " + fname,
+                            fdef.lineNumber);
+                    }
+                }
+            }
+        }
+
+        Set<String> functionsCalled = new HashSet<String>();
+        Queue<String> functionsQueue = new ArrayDeque<String>();
+        functionsQueue.add(ENTRY_POINT_FUNCTION); // Entry point of the program
+        String currentName;
+        // Trace all functions that will be called.
+		while ((currentName = functionsQueue.poll()) != null)
+		{
+			if (!functionsCalled.contains(currentName))
+			{
+                FunctionDefinition fdef = functionDefinitions.get(currentName);
+                for (String fname: fdef.functionsCalled())
+                {
+                    if (!functionDefinitions.containsKey(fname))
+                    {
+                        throw new UndefinedFunctionCall(currentName, fname, fdef.lineNumber);
+                    }
+                    functionsQueue.add(fname);
+                }
+                functionsCalled.add(currentName);
+			}
+		}
+
+		// Check for DIVERGENCE
+		for (String fname: functionsCalled)
+		{
+			if (functionDefinitions.get(fname).isRecursive())
+			{
+                return null; // detected DIVERGENCE
+			}
+		}
+
+        // Return result
+		return mainFunc.callNone();
+	}
+
+	public static Map<String, FunctionDefinition> functionDefinitions;
+}
+
+class FunctionDefinitionFactory
+{
+	private FunctionDefinitionFactory() {}
+	public static FunctionDefinition makeNone(int lineno, String funcName, TreeNode funcBody)
+	throws SemanticError
+	{
+		FunctionDefinition fdef = new FunctionDefinition(lineno, funcName, funcBody);
+		validate(fdef);
+		return fdef;
+	}
+	public static FunctionDefinition makeSingle(int lineno, String funcName, String paramName, TreeNode funcBody)
+	throws SemanticError
+	{
+		// System.out.println("DEFINING " + funcName);
+		FunctionDefinition fdef = new FunctionDefinition(lineno, funcName, funcBody);
+		fdef.addParam(paramName);
+		validate(fdef);
+		return fdef;
+	}
+    /**
+     * Performs checks the following checks that have to do with the contents
+     * of the function body.
+     */
+	public static void validate(FunctionDefinition fdef)
+	throws SemanticError
+	{
+        if (fdef.isCallingMain())
+        {
+            throw new SemanticError("Function " + fdef.funcName  + " calls "
+                + Assignment.ENTRY_POINT_FUNCTION, fdef.lineNumber);
+        }
+        if (fdef.hasWrongVars())
+        {
+            throw new SemanticError("Function " + fdef.funcName
+                + " references an undefined parameter", fdef.lineNumber);
+        }
+	}
+}
+
+class SemanticError extends Exception
+{
+    private final int lineNumber;
+    SemanticError(String msg, int lineno)
+    {
+        super(msg);
+        lineNumber = lineno;
+    }
+    public int getLineNumber()
+    {
+        return lineNumber;
+    }
+}
+
+class UndefinedFunctionCall extends SemanticError
+{
+    UndefinedFunctionCall(String caller, String callee, int lineno)
+    {
+        super("Function " + caller + " calls undefined function " + callee, lineno);
+    }    
+}
+
+class DuplicateFunctionDefinition extends SemanticError
+{
+    DuplicateFunctionDefinition(String fn, int lineno)
+    {
+        super("Function " + fn + " was defined more than once.", lineno);
+    }
+}
+
+
+class FunctionDefinition
+{
+	public final String funcName;
+	private List<String> paramNames = new ArrayList<String>();
+	private TreeNode funcBody;
+    public final int lineNumber;
+	/**
+	 * Contains all function names of functions that were directly called by 
+	 * this function. */
+	private Set<String> _functionsCalled = null;
+	public Set<String> _parametersReferenced = null;
+	FunctionDefinition(int lineno, String funcName, TreeNode funcBody)
+	{
+        lineNumber = lineno;
+		this.funcName = funcName;
+		this.funcBody = funcBody;
+	}
+    public final Set<String> functionsCalled()
+    {
+        if (_functionsCalled == null)
+        {
+            determineBodyContents();
+        }
+        return _functionsCalled;
+    }
+    public final Set<String> parametersReferenced()
+    {
+        if (_parametersReferenced == null)
+        {
+            determineBodyContents();
+        }
+        return _parametersReferenced;
+    } 
+	private void determineBodyContents()
+	{
+		_functionsCalled = new HashSet<String>();
+		_parametersReferenced = new HashSet<String>();
+		Queue<TreeNode> unchecked = new ArrayDeque<TreeNode>();
+		// Begin search at root of function body.
+		unchecked.add(funcBody);
+		TreeNode current;
+		while ((current = unchecked.poll()) != null)
+		{	
+			if (current instanceof FuncNode)
+			{
+				_functionsCalled.add( ((FuncNode) current).funcName );
+                unchecked.add( ((FuncNode) current).argument );
+			}
+			else if (current instanceof VarNode)
+			{
+				_parametersReferenced.add( ((VarNode) current).varName );
+			}
+			else
+			{
+				unchecked.addAll(current.subnodes());
+			}
+		}
+	}
+	/** Indicates whether or not this function directly calls itself. */
+	public boolean isRecursive()
+	{
+		return functionsCalled().contains(this.funcName);
+	}
+    public boolean isCallingMain()
+    {
+        return functionsCalled().contains(Assignment.ENTRY_POINT_FUNCTION);
+    }
+    /**
+     * Returns true iff the function body references parameter(s) other than
+     * the one(s) in the function definition.
+     */
+	public boolean hasWrongVars()
+	{
+		return !(new HashSet<String>(paramNames)).containsAll(parametersReferenced());
+	}
+	public void addParam(String paramName)
+	{
+		paramNames.add(paramName);
+	}
+    public int paramCount()
+    {
+        return paramNames.size();
+    }
+    /** Call function using zero arguments, currently only used for MAIN. */ 
+	public int callNone()
+	{
+        if (paramNames.size() != 0)
+        {
+            throw new RuntimeException("Cannot call function with "
+                + paramNames.size() + " parameters using no arguments.");
+        }
+		return funcBody.eval(new HashMap<String, Integer>());
+	}
+    /** Call function using a single argument. */
+	public int callSingle(int argument)
+	{
+		if (paramNames.size() != 1)
+		{
+			throw new RuntimeException("Cannot call function with "
+                + paramNames.size() + " parameters using 1 argument.");
+		}
+		Map<String, Integer> vals = new HashMap<String, Integer>();
+		vals.put(paramNames.get(0), argument);
+		return funcBody.eval(vals);
+	}
+}
+
+interface TreeNode
+{
+	public abstract List<TreeNode> subnodes();
+	public abstract int eval(Map<String, Integer> vals);
+}
+
+class MultNode implements TreeNode
+{
+	private List<TreeNode> _subnodes = new ArrayList<TreeNode>();
+	public List<TreeNode> subnodes()
+	{
+		return _subnodes;
+	}
+	public void addNode(TreeNode n)
+	{
+		_subnodes.add(n);
+	}
+	public int eval(Map<String, Integer> vals)
+	{
+		int value = 1;
+		for (TreeNode node : subnodes())
+		{
+			value *= node.eval(vals);
+		}
+		return value;
+	}
+}
+
+class AddNode implements TreeNode
+{
+	private final List<TreeNode> _subnodes = new ArrayList<TreeNode>();
+	public List<TreeNode> subnodes()
+	{
+		return _subnodes;
+	}
+	public void addNode(TreeNode n)
+	{
+		_subnodes.add(n);
+	}
+	public int eval(Map<String, Integer> vals)
+	{
+		int value = 0;
+		for (TreeNode node: subnodes())
+		{
+			value += node.eval(vals);
+		}
+		return value;
+	}
+}
+
+class VarNode implements TreeNode
+{
+	private final List<TreeNode> _subnodes = new ArrayList<TreeNode>();
+	public List<TreeNode> subnodes()
+	{
+		return _subnodes;
+	}
+	public final String varName;
+	VarNode(String varName)
+	{
+		this.varName = varName;
+	}
+	public int eval(Map<String, Integer> vals)
+	{
+		return vals.get(varName);
+	}
+}
+
+class ConstNode implements TreeNode
+{
+	private List<TreeNode> _subnodes = new ArrayList<TreeNode>();
+	public List<TreeNode> subnodes()
+	{
+		return _subnodes;
+	}
+	private int value;
+	ConstNode(int value)
+	{
+		this.value = value;
+	}
+	public int eval(Map<String, Integer> vals)
+	{
+		return value;
+	}
+}
+
+class FuncNode implements TreeNode
+{
+	private List<TreeNode> _subnodes = new ArrayList<TreeNode>();
+	public List<TreeNode> subnodes()
+	{
+		return _subnodes;
+	}
+	public final String funcName;
+	public final TreeNode argument;
+	FuncNode(String funcName, TreeNode argument)
+	{
+		this.funcName = funcName;
+		this.argument = argument;
+	}
+	public int eval(Map<String, Integer> vals)
+	{
+		FunctionDefinition func = Assignment.functionDefinitions.get(funcName);
+		if (func == null)
+		{
+			throw new NoSuchMethodError("Function \"" + funcName + "\" is not defined.");
+		}
+		return func.callSingle(argument.eval(vals));
+	}	
+}
+
+PARSER_END(Assignment)
+
+TOKEN :
+{
+    /** Keyword that denotes the beginning of a function definition */
+    < DEF : "DEF" >
+    |
+    /** Character that denotes the end of a function definition */
+    < SEMICOLON : ";" >
+    |
+    /** Function name, consisting of one or more upper case letters */
+    < FUNCTION_NAME : (<UPPER_LETTER>)+ >
+    |
+    /** Name of a single parameter. */
+    < PARAMETER_NAME : (<LOWER_LETTER>)+ >
+    |
+    /** Left brace. Denotes start of function body. */
+    < LEFT_BRACE : "{" >
+    |
+    /** Right brace. Denotes end of function body. */
+    < RIGHT_BRACE : "}" >
+    |
+    /** Multiplication symbol. */
+    < TIMES : "*" >
+    |
+    /** Addition symbol */
+    < PLUS : "+" >
+    |
+    /** Number literal */
+    < NUMBER_LITERAL : (<DIGIT>)+ >
+    |
+    /** Character that denotes the start of a function call. */
+    < LEFT_PARENTHESIS : "(" >
+    |
+    /** Character that denotes the end of a function call. */
+    < RIGHT_PARENTHESIS : ")" >
+    |
+    /**
+     * End Of Line token, supports either one or both of CR-LF (Carriage Return
+     * '\r' and Line Feed '\n').
+     */
+    < EOL : "\n" | "\r" | "\r\n" >
+    |
+    /** Single numerical character. */
+    < #DIGIT : ["0"-"9"] >
+    |
+    /** Single upper case letter. */
+    < #UPPER_LETTER : (["A"-"Z"])+ >
+    |
+    /** Single lower case letter. */
+    < #LOWER_LETTER : (["a"-"z"])+ >
+}
+
+
+Map<String, FunctionDefinition> Start() throws SemanticError :
+{
+	Map<String, FunctionDefinition> functionDefinitions = new HashMap<String, FunctionDefinition>();
+}
+{
+	( FunctionDefinitionLine(functionDefinitions) )* <EOF>
+	{ return functionDefinitions; }
+}
+
+FunctionDefinition 
+FunctionDefinitionLine(Map<String, FunctionDefinition> functionDefinitions)
+throws SemanticError :
+{
+	Token funcName, paramName = null;
+	TreeNode funcBody;
+	FunctionDefinition fdef;
+    int lineno;
+}
+{
+	<DEF> " "
+    funcName = <FUNCTION_NAME> " "
+    [ paramName = <PARAMETER_NAME> " " ]
+    <LEFT_BRACE> " " 
+    funcBody = ArithmeticExpr() " "
+    <RIGHT_BRACE> " " 
+    <SEMICOLON> <EOL>
+	{
+        lineno = funcName.beginLine;
+
+        if (paramName == null)
+        {
+            fdef = FunctionDefinitionFactory.makeNone(lineno, funcName.image, funcBody);
+        }
+        else
+        {
+            fdef = FunctionDefinitionFactory.makeSingle(lineno, funcName.image, paramName.image, funcBody);
+        }
+		
+        // Duplicate function
+        if (functionDefinitions.containsKey(fdef.funcName))
+		{
+			throw new DuplicateFunctionDefinition(fdef.funcName, lineno);
+		}
+		
+        functionDefinitions.put(fdef.funcName, fdef);
+		return fdef;
+	}
+}
+
+AddNode ArithmeticExpr() :
+{
+	AddNode addexpr = new AddNode();
+	TreeNode n;
+}
+{
+	n = Multiplication()
+	{ addexpr.addNode(n); }
+	(
+		<PLUS>
+		n = Multiplication()
+		{ addexpr.addNode(n); }
+	)*
+	{ return addexpr; }
+}
+
+MultNode Multiplication() :
+{
+	MultNode multexpr = new MultNode();
+	TreeNode n;
+}
+{
+	n = Unit()
+	{ multexpr.addNode(n); }
+	(
+		<TIMES>
+		n = Unit()
+		{ multexpr.addNode(n); }
+	)*
+	{ return multexpr; }
+}
+
+// Smallest possible unit of an expression
+TreeNode Unit() :
+{
+	TreeNode n;
+}
+{
+	(n=Primary() | n=Variable() | n=FunctionCall())
+	{ return n; }
+}
+
+VarNode Variable() :
+{
+	Token varName;
+}
+{
+	varName = <PARAMETER_NAME>
+	{ return new VarNode(varName.image); }
+}
+
+FuncNode FunctionCall() :
+{
+	Token funcName;
+	TreeNode argument;
+}
+{
+	funcName = <FUNCTION_NAME>
+	<LEFT_PARENTHESIS>
+	argument = ArithmeticExpr()
+	<RIGHT_PARENTHESIS>
+	{ return new FuncNode(funcName.image, argument); }
+}
+
+ConstNode Primary() :
+{
+	Token t;
+}
+{
+	t = <NUMBER_LITERAL>
+	{ return new ConstNode(Integer.parseInt(t.image)); }
+}
